@@ -31,15 +31,9 @@ class Individual:
             self.genome = self.initialize(weights)
 
         self.size = self.genome.size
-
         self.fitness = self.calc_fitness(weights)
 
-        self.mutation_rate = 0.1
-        
-        self.local_search_rate = 0.3
-        self.local_search_attempts = self.size // 2
-
-
+ 
     def initialize(self, weights: Weights) -> Genome:
         size = weights.shape[0]
         genome = np.empty(size, dtype=np.int32)
@@ -73,8 +67,8 @@ class Individual:
         return result
 
 
-    def mutate(self, weights: Weights) -> None:
-        while np.random.rand() < self.mutation_rate:
+    def mutate(self, weights: Weights, rate: float) -> None:
+        while np.random.rand() < rate:
             size = np.random.randint(self.size // 5)
             start = np.random.randint(self.size - size - 1) + 1
             end = start + size
@@ -107,12 +101,12 @@ class Individual:
         return Individual(weights, child_genome)
 
 
-    def local_search(self, weights: Weights) -> None:
-        if np.random.rand() < self.local_search_rate:
+    def local_search(self, weights: Weights, rate: float, attempts: int) -> None:
+        if np.random.rand() < rate:
             best_fitness = self.fitness
             best_swap = (0, 0)
 
-            for _ in range(self.local_search_attempts):
+            for _ in range(attempts):
                 idx1, idx2 = np.random.choice(self.size, 2, replace=False)
                 self.genome[idx1], self.genome[idx2] = self.genome[idx2], self.genome[idx1]
                 new_fitness = self.calc_fitness(weights)
@@ -129,82 +123,193 @@ class Individual:
 
 
 
-def k_tournament(population: Population, k: int, exclude: Individual | None=None) -> Individual:
-    if exclude is not None:
-        population = list(filter(lambda x: x is not exclude, population))
-
-    candidates = random.sample(population, k)
-    return min(candidates, key=lambda x: x.fitness)
 
 
-def crossover(population: Population, weights: Weights, mu: int, k: int) -> Population:
-    new_population = population.copy()
-
-    for _ in range(mu):
-        parent1 = k_tournament(population, k)
-        parent2 = k_tournament(population, k, exclude=parent1)
-
-        if random.random() < 0.2:
-            population.remove(parent1)
-
-        if random.random() < 0.2:
-            population.remove(parent2)
-
-        child = Individual.combine(parent1, parent2, weights)
-        new_population.append(child)
-
-    return new_population
-
-
-def mutate_inplace(population: Population, weights: Weights) -> None:
-    for individual in population:
-        individual.mutate(weights)
-
-
-def local_search_inplace(population: Population, weights: Weights) -> None:
-    for individual in population:
-        individual.local_search(weights)
+class Algorithm:
+    def __init__(
+            self,
+            weights: Weights,
+            lam: int, 
+            mu: int,
+            crossover_k: int,
+            elimination_k: int,
+            mutation_rate: float,
+            local_search_rate: float,
+            local_search_attempts: int
+        ) -> None:
+        
+        self.weights = weights
+        self.lam = lam
+        self.mu = mu
+        self.crossover_k = crossover_k
+        self.elimination_k = elimination_k
+        self.mutation_rate = mutation_rate
+        
+        self.local_search_rate = local_search_rate
+        self.local_search_attempts = local_search_attempts
 
 
-def elimination(population: Population, lam: int, k: int) -> Population:
-    survivors: Population = []
+    def initialize(self) -> Population:
+        population: Population = []
+        for _ in range(self.lam):
+            population.append(Individual(self.weights))
 
-    for _ in range(lam):
-        winner = k_tournament(population, k)
+        return population
+
     
-        survivors.append(winner)
-        population.remove(winner)
+    @staticmethod
+    def k_tournament(population: Population, k: int, exclude: Individual | None=None) -> Individual:
+        if exclude is not None:
+            population = list(filter(lambda x: x is not exclude, population))
 
-    return survivors
+        candidates = random.sample(population, k)
+        return min(candidates, key=lambda x: x.fitness)
+
+
+    def crossover(self, population: Population) -> Population:
+        new_population = population.copy()
+
+        for _ in range(self.mu):
+            parent1 = self.k_tournament(population, self.crossover_k)
+            parent2 = self.k_tournament(population, self.crossover_k, exclude=parent1)
+
+            if random.random() < 0.2:
+                population.remove(parent1)
+
+            if random.random() < 0.2:
+                population.remove(parent2)
+
+            child = Individual.combine(parent1, parent2, self.weights)
+            new_population.append(child)
+
+        return new_population
+
+
+    def mutate_inplace(self, population: Population) -> None:
+        for individual in population:
+            individual.mutate(self.weights, self.mutation_rate)
+
+
+    def local_search_inplace(self, population: Population) -> None:
+        for individual in population:
+            individual.local_search(self.weights, self.local_search_rate, self.local_search_attempts)
+
+
+    def elimination(self, population: Population) -> Population:
+        survivors: Population = []
+
+        for _ in range(self.lam):
+            winner = self.k_tournament(population,self.elimination_k)
+        
+            survivors.append(winner)
+            population.remove(winner)
+
+        return survivors
+
+
+    def __call__(self, population: Population) -> Population:
+        population = self.crossover(population)
+        self.mutate_inplace(population)
+
+        population = self.elimination(population)
+        self.local_search_inplace(population)
+
+        return population
+
+
+
+
+
+class Island:
+    def __init__(
+            self,
+            weights: Weights,
+            lam: int, 
+            mu: int,
+            crossover_k: int,
+            elimination_k: int,
+            mutation_rate: float,
+            local_search_rate: float,
+            local_search_attempts: int
+        ) -> None:
+
+        self.algorithm = Algorithm(
+            weights,
+            lam, mu,
+            crossover_k, elimination_k,
+            mutation_rate,
+            local_search_rate, local_search_attempts
+        )
+
+        self.size = lam
+        self.population = self.algorithm.initialize()
+
+
+    def run(self):
+        self.population = self.algorithm(self.population)
+
+
+    def exchange(self, other: 'Island', n: int):
+        for _ in range(n):
+            idx1 = random.randint(0, self.size - 1)
+            idx2 = random.randint(0, other.size - 1)
+
+            self.population[idx1], other.population[idx2] = other.population[idx2], self.population[idx1]
+
+
+    def get_best(self):
+        return min(self.population, key=lambda x: x.fitness)
+
+
+
+def load_tour(file_path: str) -> Weights:
+    with open(file_path, "r") as file:
+        return np.loadtxt(file, delimiter=",", dtype=np.float32)
 
 
 def algorithm():
-    with open("./tours/tour250.csv", "r") as file:
-        weights = np.loadtxt(file, delimiter=",", dtype=np.float32)
+    weights = load_tour("./tours/tour250.csv")
 
-    lam = 500
-    mu = 800
+    lam = 300
+    mu = 500
     crossover_k = lam // 20
     elimination_k = (lam + mu) // 20
+    mutation_rate = 0.1
+    
+    local_search_rate = 0.3
+    local_search_attempts = 20
 
-
-    population: Population = []
-    for _ in range(lam):
-        population.append(Individual(weights))
+    islands: list[Island] = []
+    for _ in range(2):
+        islands.append(Island(
+            weights,
+            lam, mu,
+            crossover_k, elimination_k,
+            mutation_rate,
+            local_search_rate, local_search_attempts
+        ))
 
     for i in range(1000):
         t1 = time.time_ns()
 
-        population = crossover(population, weights, mu, crossover_k)
-        mutate_inplace(population, weights)
+        for island in islands:
+            island.run()
+         
+        if i % 30 == 0:
+            for island1 in islands:
+                for island2 in islands:
+                    if island1 is island2:
+                        continue
 
-        population = elimination(population, lam, elimination_k)
-        local_search_inplace(population, weights)
+                    island1.exchange(island2, 60)
 
-        best = min(population, key=lambda x: x.fitness)
+        best = min([island.get_best() for island in islands], key=lambda x: x.fitness)
 
         t2 = time.time_ns()
         print(f"It: {i} Best: {best.fitness:.5f} Time: {(t2 - t1) * 1e-6:.2f}")
+
+
+
 
 
 algorithm()
