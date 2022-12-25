@@ -37,10 +37,10 @@ class Individual:
         self.mutation_rate = 0.1
         
         self.local_search_rate = 0.3
-        self.local_search_attempts = 10
+        self.local_search_attempts = self.size // 2
 
 
-    def initialize(self, weights: Weights):
+    def initialize(self, weights: Weights) -> Genome:
         size = weights.shape[0]
         genome = np.empty(size, dtype=np.int32)
         sample_size = size // 20
@@ -65,7 +65,7 @@ class Individual:
         return genome
 
 
-    def calc_fitness(self, weights: Weights):
+    def calc_fitness(self, weights: Weights) -> float:
         result = 0.0
         for (start, end) in zip(self.genome, np.roll(self.genome, -1)):
             result += weights[start][end]
@@ -73,7 +73,7 @@ class Individual:
         return result
 
 
-    def mutate(self, weights: Weights):
+    def mutate(self, weights: Weights) -> None:
         while np.random.rand() < self.mutation_rate:
             size = np.random.randint(self.size // 5)
             start = np.random.randint(self.size - size - 1) + 1
@@ -85,7 +85,7 @@ class Individual:
 
 
     @staticmethod
-    def combine(parent1: 'Individual', parent2: 'Individual', weights: Weights):
+    def combine(parent1: 'Individual', parent2: 'Individual', weights: Weights) -> 'Individual':
         child_genome = np.full_like(parent1.genome, -1)
 
         start = random.randint(0, parent1.size - 2)
@@ -95,7 +95,7 @@ class Individual:
         child_genome[start:end] = parent1.genome[start:end]
 
         last_idx = 0
-        for i in (i for i in range(child_genome.size) if i < start or i >= end):
+        for i in [i for i in range(child_genome.size) if i < start or i >= end]:
             for j in range(last_idx, parent2.size):
                 if parent2.genome[j] in child_genome:
                     continue
@@ -104,10 +104,10 @@ class Individual:
                 last_idx = j
                 break
 
-        return Individual(weights, initial_genome=child_genome)
+        return Individual(weights, child_genome)
 
 
-    def local_search(self, weights: Weights):
+    def local_search(self, weights: Weights) -> None:
         if np.random.rand() < self.local_search_rate:
             best_fitness = self.fitness
             best_swap = (0, 0)
@@ -128,8 +128,8 @@ class Individual:
             self.fitness = self.calc_fitness(weights)
 
 
-        
-def k_tournament(population: Population, k: int, exclude: Individual | None=None):
+
+def k_tournament(population: Population, k: int, exclude: Individual | None=None) -> Individual:
     if exclude is not None:
         population = list(filter(lambda x: x is not exclude, population))
 
@@ -137,12 +137,18 @@ def k_tournament(population: Population, k: int, exclude: Individual | None=None
     return min(candidates, key=lambda x: x.fitness)
 
 
-def crossover(population: Population, weights: Weights, mu: int, k: int):
+def crossover(population: Population, weights: Weights, mu: int, k: int) -> Population:
     new_population = population.copy()
 
     for _ in range(mu):
         parent1 = k_tournament(population, k)
         parent2 = k_tournament(population, k, exclude=parent1)
+
+        if random.random() < 0.2:
+            population.remove(parent1)
+
+        if random.random() < 0.2:
+            population.remove(parent2)
 
         child = Individual.combine(parent1, parent2, weights)
         new_population.append(child)
@@ -150,17 +156,17 @@ def crossover(population: Population, weights: Weights, mu: int, k: int):
     return new_population
 
 
-def mutate_inplace(population: Population, weights: Weights):
+def mutate_inplace(population: Population, weights: Weights) -> None:
     for individual in population:
         individual.mutate(weights)
 
 
-def local_search_inplace(population: Population, weights: Weights):
+def local_search_inplace(population: Population, weights: Weights) -> None:
     for individual in population:
         individual.local_search(weights)
 
 
-def elimination(population: Population, lam: int, k: int):
+def elimination(population: Population, lam: int, k: int) -> Population:
     survivors: Population = []
 
     for _ in range(lam):
@@ -173,7 +179,7 @@ def elimination(population: Population, lam: int, k: int):
 
 
 def algorithm():
-    with open("./tours/tour50.csv", "r") as file:
+    with open("./tours/tour250.csv", "r") as file:
         weights = np.loadtxt(file, delimiter=",", dtype=np.float32)
 
     lam = 500
@@ -198,6 +204,7 @@ def algorithm():
         best = min(population, key=lambda x: x.fitness)
 
         t2 = time.time_ns()
-        print("It:", i, "Best:", best.fitness, "Time:", (t2 - t1) * 12-6)
+        print(f"It: {i} Best: {best.fitness:.5f} Time: {(t2 - t1) * 1e-6:.2f}")
 
 
+algorithm()
