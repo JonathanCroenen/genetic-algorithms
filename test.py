@@ -7,6 +7,7 @@ import time
 from numba import int32, float32
 from numba.experimental import jitclass
 
+import matplotlib.pyplot as plt
 
 
 Genome = NDArray[np.int32]
@@ -19,25 +20,21 @@ Population = list['Individual']
               ("genome", int32[:]),
               ("size", int32),
               ("fitness", float32),
-              ("mutation_rate", float32),
-              ("local_search_rate", float32),
-              ("local_search_attempts", float32)
           ])
 class Individual:
-    def __init__(self, weights: Weights, initial_genome: Genome | None=None) -> None:
-        if initial_genome is not None:
-            self.genome = initial_genome
-        else:
-            self.genome = self.initialize(weights)
-
+    def __init__(self, weights: Weights, genome: Genome | None=None, initialization_k: int | None=None) -> None:
+        if genome is not None:
+            self.genome = genome
+        elif initialization_k is not None:
+            self.genome = self.random_genome(weights, initialization_k)
         self.size = self.genome.size
         self.fitness = self.calc_fitness(weights)
 
- 
-    def initialize(self, weights: Weights) -> Genome:
+
+    def random_genome(self, weights: Weights, k: int) -> Genome:
         size = weights.shape[0]
         genome = np.empty(size, dtype=np.int32)
-        sample_size = size // 20
+        sample_size = k
 
         valid = np.arange(size, dtype=np.int32)
         genome[0] = np.random.randint(size)
@@ -98,7 +95,7 @@ class Individual:
                 last_idx = j
                 break
 
-        return Individual(weights, child_genome)
+        return Individual(weights, child_genome, None)
 
 
     def local_search(self, weights: Weights, rate: float, attempts: int) -> None:
@@ -107,22 +104,21 @@ class Individual:
             best_swap = (0, 0)
 
             for _ in range(attempts):
-                idx1, idx2 = np.random.choice(self.size, 2, replace=False)
-                self.genome[idx1], self.genome[idx2] = self.genome[idx2], self.genome[idx1]
+                size = np.random.randint(self.size // 5)
+                start = np.random.randint(self.size - size - 1) + 1
+                end = start + size
+
+                self.genome[start:end] = self.genome[start:end][::-1]
                 new_fitness = self.calc_fitness(weights)
-                
+
                 if new_fitness < best_fitness:
                     best_fitness = new_fitness
-                    best_swap = (idx1, idx2)
+                    best_swap = (start, end)
 
-                self.genome[idx1], self.genome[idx2] = self.genome[idx2], self.genome[idx1]
+                self.genome[start:end] = self.genome[start:end][::-1]
 
-            self.genome[best_swap[0]], self.genome[best_swap[1]] = self.genome[best_swap[1]], self.genome[best_swap[0]]
-
-            self.fitness = self.calc_fitness(weights)
-
-
-
+            self.genome[best_swap[0]:best_swap[1]] = self.genome[best_swap[0]:best_swap[1]][::-1]
+            self.fitness = best_fitness
 
 
 class Algorithm:
@@ -131,6 +127,7 @@ class Algorithm:
             weights: Weights,
             lam: int, 
             mu: int,
+            initialization_k: int,
             crossover_k: int,
             elimination_k: int,
             mutation_rate: float,
@@ -139,10 +136,13 @@ class Algorithm:
         ) -> None:
         
         self.weights = weights
+
         self.lam = lam
         self.mu = mu
         self.crossover_k = crossover_k
         self.elimination_k = elimination_k
+        self.initialization_k = initialization_k
+
         self.mutation_rate = mutation_rate
         
         self.local_search_rate = local_search_rate
@@ -152,7 +152,7 @@ class Algorithm:
     def initialize(self) -> Population:
         population: Population = []
         for _ in range(self.lam):
-            population.append(Individual(self.weights))
+            population.append(Individual(self.weights, initialization_k=self.initialization_k))
 
         return population
 
@@ -173,10 +173,10 @@ class Algorithm:
             parent1 = self.k_tournament(population, self.crossover_k)
             parent2 = self.k_tournament(population, self.crossover_k, exclude=parent1)
 
-            if random.random() < 0.2:
+            if random.random() < 0.1:
                 population.remove(parent1)
 
-            if random.random() < 0.2:
+            if random.random() < 0.1:
                 population.remove(parent2)
 
             child = Individual.combine(parent1, parent2, self.weights)
@@ -228,20 +228,24 @@ class Island:
             mu: int,
             crossover_k: int,
             elimination_k: int,
+            initialization_k: int,
             mutation_rate: float,
             local_search_rate: float,
-            local_search_attempts: int
+            local_search_attempts: int,
+            num_exchanges: int
         ) -> None:
 
         self.algorithm = Algorithm(
             weights,
             lam, mu,
             crossover_k, elimination_k,
+            initialization_k,
             mutation_rate,
             local_search_rate, local_search_attempts
         )
 
         self.size = lam
+        self.num_exchanges = num_exchanges
         self.population = self.algorithm.initialize()
 
 
@@ -249,7 +253,8 @@ class Island:
         self.population = self.algorithm(self.population)
 
 
-    def exchange(self, other: 'Island', n: int):
+    def exchange(self, other: 'Island'):
+        n = (self.num_exchanges + other.num_exchanges) // 2
         for _ in range(n):
             idx1 = random.randint(0, self.size - 1)
             idx2 = random.randint(0, other.size - 1)
@@ -257,8 +262,13 @@ class Island:
             self.population[idx1], other.population[idx2] = other.population[idx2], self.population[idx1]
 
 
-    def get_best(self):
+    def get_best(self) -> Individual:
         return min(self.population, key=lambda x: x.fitness)
+
+
+    def get_average_fitness(self) -> float:
+        fitnesses = [x.fitness for x in self.population]
+        return sum(fitnesses) / len(fitnesses)
 
 
 
@@ -267,49 +277,71 @@ def load_tour(file_path: str) -> Weights:
         return np.loadtxt(file, delimiter=",", dtype=np.float32)
 
 
-def algorithm():
+def optimize():
     weights = load_tour("./tours/tour250.csv")
+    size = weights.shape[0]
 
-    lam = 300
-    mu = 500
-    crossover_k = lam // 20
-    elimination_k = (lam + mu) // 20
-    mutation_rate = 0.1
-    
-    local_search_rate = 0.3
-    local_search_attempts = 20
+    lam = 600
+    mu = 1200
 
-    islands: list[Island] = []
-    for _ in range(2):
-        islands.append(Island(
+    islands: list[Island] = [
+        Island(
             weights,
             lam, mu,
-            crossover_k, elimination_k,
-            mutation_rate,
-            local_search_rate, local_search_attempts
-        ))
+            4, 8,#lam // 30, (lam + mu) // 30,
+            size // 2,
+            0.1,
+            0.4, 20,
+            lam // 2
+        ),
+        Island(
+            weights,
+            lam, mu,
+            lam // 100, (lam + mu) // 100,
+            2,
+            0.7,
+            0.1, 10,
+            lam // 2
+        ),
+        Island(
+            weights,
+            lam, mu,
+            lam // 100, (lam + mu) // 100,
+            2,
+            0.7,
+            0.1, 10,
+            lam // 2
+        ),
+    ]
 
-    for i in range(1000):
+    plot_data = []
+    for i in range(250):
         t1 = time.time_ns()
 
         for island in islands:
             island.run()
          
-        if i % 30 == 0:
-            for island1 in islands:
-                for island2 in islands:
+        if i % 40 == 0 and i != 0:
+            for j, island1 in enumerate(islands):
+                for island2 in islands[j:]:
                     if island1 is island2:
                         continue
 
-                    island1.exchange(island2, 60)
+                    island1.exchange(island2)
 
         best = min([island.get_best() for island in islands], key=lambda x: x.fitness)
+        average_fits = [island.get_average_fitness() for island in islands]
+        formatted_fits = ["{:.5f}".format(x) for x in average_fits]
+
+        plot_data.append((best.fitness, *average_fits))
 
         t2 = time.time_ns()
-        print(f"It: {i} Best: {best.fitness:.5f} Time: {(t2 - t1) * 1e-6:.2f}")
+        print(f"It: {i} Averages: {formatted_fits} Best: {best.fitness:.5f} Time: {(t2 - t1) * 1e-9:.2f}")
+
+    plt.plot(plot_data)
+    plt.legend(["best", *["average island {}".format(i) for i in range(len(islands))]])
+    plt.show()
 
 
 
-
-
-algorithm()
+optimize()
