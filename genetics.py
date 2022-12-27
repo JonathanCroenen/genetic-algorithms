@@ -1,8 +1,3 @@
-import os
-
-os.environ["NUMBA_PARALLEL_DIAGNOSTICS"] = "4"
-
-
 import numpy as np
 from numba import njit
 import matplotlib.pyplot as plt
@@ -13,24 +8,22 @@ import Reporter
 def initialize(weights, lam):
     size = weights.shape[0]
     population = np.empty((lam, size), dtype=np.int32)
-    sample_size = lam // 20
+    sample_size = weights.shape[0] // 2
 
     for i in range(lam):
         valid = np.arange(size, dtype=np.int32)
         population[i][0] = np.random.randint(size)
 
-        valid = np.delete(
-            valid, np.where(valid == population[i][0])[0].astype(np.int32)
-        )
-
         for j in range(1, size):
+            previous = population[i][j - 1]
+            valid = np.delete(valid, np.where(valid == previous)[0])
+
             candidates = np.random.choice(
                 valid, min(sample_size, valid.size), replace=False
             )
             best = np.argmin(weights[population[i][j - 1]][candidates])
             next = candidates[best]
 
-            valid = np.delete(valid, np.where(valid == next)[0].astype(np.int32))
             population[i][j] = next
 
     return population
@@ -55,46 +48,55 @@ def population_fitness(weights, population):
 
 
 @njit(nogil=True)
-def k_tournament(range, objective, k):
-    idx = np.random.choice(range, k, replace=False)
+def k_tournament(available, objective, k):
+    idx = np.random.choice(available, k, replace=False)
     best = np.argmin(objective[idx])
     return idx[best]  # type: ignore
 
 
 @njit(nogil=True)
+def combine(parent1, parent2, path_length, result):
+    start, end = np.random.choice(path_length, 2, replace=False)
+
+    idx_to_fill = None
+    if start <= end:
+        result[start:end] = parent1[start:end]
+        idx_to_fill = np.arange(start + path_length - end)
+        idx_to_fill[-path_length + end :] = np.arange(end, path_length)
+    else:
+        result[start:path_length] = parent1[start:path_length]
+        result[0:end] = parent1[0:end]
+        idx_to_fill = np.arange(end, start)
+
+    last_idx = 0
+    for j in idx_to_fill:
+        for n in range(last_idx, path_length):
+            if parent2[n] not in result:
+                result[j] = parent2[n]
+                last_idx = n + 1
+                break
+
+
+
+
+@njit(nogil=True)
 def crossover(population, fitnesses, mu, k):
     path_length = population[0].size
-    results = np.full((mu, path_length), -1, dtype=np.int32)
+    new_population = np.full((population.shape[0] + mu, path_length), -1, dtype=np.int32)
+    new_population[:population.shape[0]] = population
 
+    available = np.arange(population.shape[0], dtype=np.int32)
     for i in range(mu):
-        p1_idx = k_tournament(population.shape[0], fitnesses, k)
-        p2_idx = k_tournament(population.shape[0], fitnesses, k)
+        p1_idx = k_tournament(available.shape[0], fitnesses[available], k)
+        p2_idx = k_tournament(available.shape[0], fitnesses[available], k)
 
-        parent1 = population[p1_idx]
-        parent2 = population[p2_idx]
+        parent1 = population[available[p1_idx]]
+        parent2 = population[available[p2_idx]]
 
-        result = results[i]
-        start, end = np.random.choice(path_length, 2, replace=False)
+        result = new_population[i + population.shape[0]]
+        combine(parent1, parent2, path_length, result)
 
-        idx_to_fill = None
-        if start <= end:
-            result[start:end] = parent1[start:end]
-            idx_to_fill = np.arange(start + path_length - end)
-            idx_to_fill[-path_length + end :] = np.arange(end, path_length)
-        else:
-            result[start:path_length] = parent1[start:path_length]
-            result[0:end] = parent1[0:end]
-            idx_to_fill = np.arange(end, start)
-
-        last_idx = 0
-        for j in idx_to_fill:
-            for n in range(last_idx, path_length):
-                if parent2[n] not in result:
-                    result[j] = parent2[n]
-                    last_idx = n + 1
-                    break
-
-    return results
+    return new_population
 
 
 
@@ -104,15 +106,11 @@ def mutation(population, rate):
 
     for individual in population:
         while np.random.rand() < rate:
-            size = np.random.randint(0.2 * length)
-            start = np.random.randint(length - size - 1) + 1
+            start = np.random.randint(length - 1)
+            size = np.random.randint(length - start - 1)
             end = start + size
 
-            if start == 0:
-                individual[start:end] = individual[end-1::-1]
-            else:
-                individual[start:end] = individual[end-1:start-1:-1]
-
+            individual[start:end] = individual[start:end][::-1]
 
 
 @njit(nogil=True)
@@ -120,56 +118,33 @@ def path_distance(perm1, perm2):
     length = perm1.size
 
     distance = 0
-    for i in range(length + 1):
+    for i in range(length):
         for j in range(length):
-            if perm1[i] != perm2[j]:
-                continue
-
-            if perm1[(i + 1) % length] != perm2[(j + 1) % length]:
-                distance += 1
+            if perm1[i] == perm2[j]:
+                distance += perm1[(i + 1) % length] != perm2[(j + 1) % length]
 
     return distance
 
 
+@njit(nogil=True)
+def calculate_required_distances(population, candidates, chosen, out_distance_matrix):
+    for i in candidates:
+        out_distance_matrix[i][chosen] = path_distance(population[i], population[chosen])
+
 
 @njit(nogil=True)
-def fitness_sharing(population, fitnesses, alpha, sigma):
-    lam = population.shape[0]
-    new_fitnesses = np.empty_like(fitnesses)
-
-    for i in range(lam):
-        one_plus_beta = 1
-        for j in np.random.choice(lam, lam // 5, replace=False): #type: ignore
-            if i == j or fitnesses[i] > fitnesses[j]:
-                continue
-
-            dist = path_distance(population[i], population[j])
+def fitness_sharing(candidates_idx, selected_idx, fitnesses, distances, alpha, sigma, out_fitnesses):
+    for i in candidates_idx:
+        one_plus_beta = 1.0
+        for j in selected_idx:
+            dist = distances[i][j]
             if dist >= sigma:
                 continue
 
-            one_plus_beta += 1 - (dist / sigma) ** alpha
+            one_plus_beta += 1.0 - (dist / sigma) ** alpha
 
-        new_fitnesses[i] = fitnesses[i] * one_plus_beta
+        out_fitnesses[i] = fitnesses[i] * one_plus_beta
 
-    return new_fitnesses
-
-
-# @njit()
-# def fitness_sharing(candidates, selected, fitnesses, alpha, sigma):
-#     new_fitnesses = np.empty_like(fitnesses)
-#
-#     for i in range(candidates.shape[0]):
-#         one_plus_beta = 1.0
-#         for j in np.random.choice(selected.shape[0], selected.shape[0] // 5, replace=False): #type: ignore
-#             dist = path_distance(candidates[i], selected[j])
-#             if dist >= sigma:
-#                 continue
-#
-#             one_plus_beta += 1.0 - (dist / sigma) ** alpha
-#
-#         new_fitnesses[i] = fitnesses[i] * one_plus_beta
-#
-#     return new_fitnesses
 
 
 @njit(nogil=True)
@@ -185,58 +160,92 @@ def elimination(population, fitnesses, lam, k):
     return result
 
 
-# @njit(nogil=True)
-# def fitness_sharing_elimination(population, fitnesses, lam, k, alpha, sigma):
-#     result = np.empty((lam, population.shape[1]), dtype=np.int32)
-#
-#     available = np.arange(population.shape[0], dtype=np.int32)
-#     for i in range(lam):
-#         new_fitnesses = fitness_sharing(population[available], result[:i], fitnesses[available], alpha, sigma)
-#
-#         chosen_idx = k_tournament(available.shape[0], new_fitnesses , k)
-#         result[i] = population[available[chosen_idx]]
-#         available = np.delete(available, chosen_idx)
-#
-#     return result
+@njit(nogil=True)
+def fitness_sharing_elimination(population, fitnesses, lam, k, alpha, sigma):
+    result = np.empty((lam, population.shape[1]), dtype=np.int32)
+    out_fitnesses = np.empty_like(fitnesses)
+
+    distance_matrix = np.empty((population.shape[0], population.shape[0]), dtype=np.float32)
+
+    candidates = np.arange(population.shape[0], dtype=np.int32)
+    chosen = np.empty(lam, dtype=np.int32)
+    for i in range(lam):
+        fitness_sharing(candidates, chosen[:i], fitnesses, distance_matrix , alpha, sigma, out_fitnesses)
+
+        chosen_idx = k_tournament(candidates.shape[0],  out_fitnesses, k)
+        chosen[i] = chosen_idx
+        result[i] = population[candidates[chosen_idx]]
+        candidates = np.delete(candidates, chosen_idx)
+
+        calculate_required_distances(population, candidates, chosen_idx, distance_matrix)
+
+    return result
 
 
 @njit(nogil=True)
-def local_search(weights, population, rate, attempts):
+def local_search(weights, population, attempts):
     for individual in population:
-        if np.random.rand() < rate:
-            best_fitness = fitness(weights, individual)
-            best_swap = (0, 0)
+        best_fitness = fitness(weights, individual)
+        best_swap = (0, 0)
 
-            for _ in range(attempts):
-                idx1, idx2 = np.random.choice(individual.size, 2, replace=False)
-                individual[idx1], individual[idx2] = individual[idx2], individual[idx1]
-                new_fitness = fitness(weights, individual)
-                
-                if new_fitness < best_fitness:
-                    best_fitness = new_fitness
-                    best_swap = (idx1, idx2)
+        for _ in range(attempts):
+            start = np.random.randint(individual.size - 1)
+            size = np.random.randint(individual.size - start - 1)
+            end = start + size
 
-                individual[idx1], individual[idx2] = individual[idx2], individual[idx1]
+            individual[start:end] = individual[start:end][::-1]
+            new_fitness = fitness(weights, individual)
+           
+            if new_fitness < best_fitness:
+                best_fitness = new_fitness
+                best_swap = start, end
+           
+            individual[start:end] = individual[start:end][::-1]
 
-            individual[best_swap[0]], individual[best_swap[1]] = individual[best_swap[1]], individual[best_swap[0]]
+        individual[best_swap[0]:best_swap[1]] = individual[best_swap[0]:best_swap[1]][::-1]
 
+# @njit(nogil=True)
+# def local_search(weights, population, attempts):
+#      for individual in population:
+#         best_fitness = fitness(weights, individual)
+#         best_swap = np.zeros(2, dtype=np.int64)
+#
+#         for _ in range(attempts):
+#             idxs = np.random.choice(individual.size - 1, 2, replace=False)
+#
+#             individual[idxs] = individual[idxs[::-1]]
+#             new_fitness = fitness(weights, individual)
+#
+#             if new_fitness < best_fitness:
+#                 best_fitness = new_fitness
+#                 best_swap = idxs
+#
+#             individual[idxs] = individual[idxs[::-1]]
+#
+#         individual[best_swap] = individual[best_swap[::-1]]
 
 
 @njit(nogil=True)
-def ga_iteration(weights, population, mu, lam, k1, k2, mutation_rate):
-    initial_fitnesses = population_fitness(weights, population)
+def ga_iteration(weights, population, mu, lam, selection_k, elimination_k, mutation_rate):
+    fitnesses = population_fitness(weights, population)
 
-    # initial_fitnesses = fitness_sharing(population, initial_fitnesses, 2, lam / 20)
-    offspring = crossover(population, initial_fitnesses, mu, k1)
+    population = crossover(population, fitnesses, mu, selection_k)
+    mutation(population, mutation_rate)
 
-    total = np.concatenate((population, offspring))
-    local_search(weights, total, 0.3, 20)
-    mutation(total, mutation_rate)
-    final_fitnesses = population_fitness(weights, total)
+    local_search(weights, population, int(0.7 * weights.shape[0]))
+    fitnesses = population_fitness(weights, population)
 
-    new_population = elimination(total, final_fitnesses, lam, k2)
-
-    return new_population
+    # population = elimination(population, fitnesses, lam, elimination_k)
+    population = fitness_sharing_elimination(
+        population,
+        fitnesses,
+        lam, 
+        elimination_k,
+        0.5, 
+        int(0.2 * weights.shape[0])
+    )
+    
+    return population
 
 
 
@@ -260,11 +269,11 @@ def get_stall_criterion(n):
 
 
 def optimize(filename):
-    lam = 600
-    mu = 1000
-    selection_k = 16
-    elimination_k = 18
-    mutation_rate = 0.4
+    lam = 150
+    mu = 300
+    selection_k = lam // 20
+    elimination_k = (lam + mu) // 20
+    mutation_rate = 0.1
 
     file = open(filename)
     weights = np.loadtxt(file, delimiter=",", dtype=np.float32)
@@ -318,4 +327,4 @@ def optimize(filename):
 
 
 if __name__ == "__main__":
-    optimize("./tours/tour50.csv")
+    optimize("./tours/tour500.csv")
