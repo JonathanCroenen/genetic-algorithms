@@ -204,25 +204,6 @@ def local_search(weights, population, attempts):
 
         individual[best_swap[0]:best_swap[1]] = individual[best_swap[0]:best_swap[1]][::-1]
 
-# @njit(nogil=True)
-# def local_search(weights, population, attempts):
-#      for individual in population:
-#         best_fitness = fitness(weights, individual)
-#         best_swap = np.zeros(2, dtype=np.int64)
-#
-#         for _ in range(attempts):
-#             idxs = np.random.choice(individual.size - 1, 2, replace=False)
-#
-#             individual[idxs] = individual[idxs[::-1]]
-#             new_fitness = fitness(weights, individual)
-#
-#             if new_fitness < best_fitness:
-#                 best_fitness = new_fitness
-#                 best_swap = idxs
-#
-#             individual[idxs] = individual[idxs[::-1]]
-#
-#         individual[best_swap] = individual[best_swap[::-1]]
 
 
 @njit(nogil=True)

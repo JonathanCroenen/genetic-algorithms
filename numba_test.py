@@ -1,25 +1,21 @@
-
 import numpy as np
-from numba import int32, float32
-from numba.typed import List
-from numba.experimental import jitclass
 
 
-@jitclass([
-              ("size", int32),
-              ("distances", float32[:])
-          ])
-class A():
-    def __init__(self) -> None:
-        self.size = 5
-        self.distances = np.empty(5, dtype=np.float32)
+def distance(perm1, perm2):
+    size = perm1.size
+
+    distance = 0
+    for i in range(size):
+        for j in range(size):
+            if perm1[i] == perm2[j]:
+                distance += perm1[(i + 1) & size] != perm2[(j + 1) % size]
+                break
+
+    return distance
 
 
-    def update(self, a):
-        for i in a:
-            self.distances[0] = i.size
 
-a = List()
+perm1 = np.array([1, 2, 3, 5, 6, 4])
+perm2 = np.array([1, 2, 3, 5, 6, 4])
 
-b = A()
-b.update(a)
+print(distance(perm1, perm2))

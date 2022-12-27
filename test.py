@@ -12,8 +12,6 @@ import matplotlib.pyplot as plt
 
 Genome = NDArray[np.int32]
 Weights = NDArray[np.float32]
-Distance = np.float32
-Distances = NDArray[Distance]
 Population = list['Individual']
 
 
@@ -22,6 +20,8 @@ Population = list['Individual']
               ("genome", int32[:]),
               ("size", int32),
               ("fitness", float32),
+              ("cached_fitness", float32),
+              ("fitness_penalty", float32)
           ])
 class Individual:
     def __init__(self, weights: Weights, genome: Genome | None=None, initialization_k: int | None=None) -> None:
@@ -29,8 +29,13 @@ class Individual:
             self.genome = genome
         elif initialization_k is not None:
             self.genome = self.random_genome(weights, initialization_k)
+
         self.size = self.genome.size
+
         self.fitness = self.calc_fitness(weights)
+
+        self.cached_fitness = self.fitness
+        self.fitness_penalty = 1.0
 
 
     def random_genome(self, weights: Weights, k: int) -> Genome:
@@ -103,50 +108,53 @@ class Individual:
         return Individual(weights, child_genome, None)
 
 
-    def local_search(self, weights: Weights, rate: float, attempts: int) -> None:
-        if np.random.rand() < rate:
-            best_fitness = self.fitness
-            best_swap = (0, 0)
-    
-            for _ in range(attempts):
-                size = np.random.randint(self.size // 5)
-                start = np.random.randint(self.size - size - 1) + 1
-                end = start + size
-    
-                self.genome[start:end] = self.genome[start:end][::-1]
-                new_fitness = self.calc_fitness(weights)
-    
-                if new_fitness < best_fitness:
-                    best_fitness = new_fitness
-                    best_swap = (start, end)
-    
-                self.genome[start:end] = self.genome[start:end][::-1]
-    
-            self.genome[best_swap[0]:best_swap[1]] = self.genome[best_swap[0]:best_swap[1]][::-1]
-            self.fitness = best_fitness
+    def local_search(self, weights: Weights, attempts: int) -> None:
+        best_fitness = self.fitness
+        best_swap = (0, 0)
+
+        for _ in range(attempts):
+            size = np.random.randint(self.size // 5)
+            start = np.random.randint(self.size - size - 1) + 1
+            end = start + size
+
+            self.genome[start:end] = self.genome[start:end][::-1]
+            new_fitness = self.calc_fitness(weights)
+
+            if new_fitness < best_fitness:
+                best_fitness = new_fitness
+                best_swap = (start, end)
+
+            self.genome[start:end] = self.genome[start:end][::-1]
+
+        self.genome[best_swap[0]:best_swap[1]] = self.genome[best_swap[0]:best_swap[1]][::-1]
+        self.fitness = best_fitness
 
 
-    def share_fitness(self, distances: Distances, sigma: float, alpha: float):
-        one_plus_beta = 1.0
-
-        for dist in distances:
-            if dist >= sigma:
-                continue
-
-            one_plus_beta += 1.0 - (dist / sigma) ** alpha
-
-        self.fitness *= one_plus_beta
+    def cache_fitness(self):
+        self.cached_fitness = self.fitness
 
 
-    def distance(self, other: 'Individual'):
+    def restore_fitness(self):
+        self.fitness = self.cached_fitness
+        self.fitness_penalty = 1.0
+
+
+    def update_fitness_penalty(self, distance: int, sigma: float, alpha: float):
+        if distance < sigma:
+            self.fitness_penalty += 1.0 - (distance / sigma) ** alpha
+
+        self.fitness = self.cached_fitness * self.fitness_penalty
+
+
+    def distance(self, other: 'Individual') -> int:
         distance = 0
         for i in range(self.size):
             for j in range(other.size):
                 if self.genome[i] == other.genome[j]:
-                    distance += self.genome[(i + 1) & self.size] != other.genome[(j + 1) % other.size]
-                    # TODO: test break speedup
-                    # break
+                    distance += self.genome[(i + 1) % self.size] != other.genome[(j + 1) % other.size]
+                    break
 
+        return distance
 
 
 class Algorithm:
@@ -159,8 +167,9 @@ class Algorithm:
             elimination_k: int,
             initialization_k: int,
             mutation_rate: float,
-            local_search_rate: float,
-            local_search_attempts: int
+            local_search_attempts: int,
+            fitness_sharing_sigma: float,
+            fitness_sharing_alpha: float
         ) -> None:
         
         self.weights = weights
@@ -172,9 +181,10 @@ class Algorithm:
         self.initialization_k = initialization_k
 
         self.mutation_rate = mutation_rate
-        
-        self.local_search_rate = local_search_rate
         self.local_search_attempts = local_search_attempts
+
+        self.fitness_sharing_sigma = fitness_sharing_sigma
+        self.fitness_sharing_alpha = fitness_sharing_alpha
 
 
     def initialize(self) -> Population:
@@ -184,12 +194,13 @@ class Algorithm:
 
         return population
 
-    
+
     @staticmethod
     def k_tournament(population: Population, k: int, exclude: Individual | None=None) -> Individual:
         candidates = random.sample(population, k)
         if exclude is not None and exclude in candidates:
             candidates.remove(exclude)
+
         return min(candidates, key=lambda x: x.fitness)
 
 
@@ -197,14 +208,8 @@ class Algorithm:
         new_population = population.copy()
 
         for _ in range(self.mu):
-            parent1 = self.k_tournament(population, self.crossover_k)
-            parent2 = self.k_tournament(population, self.crossover_k, exclude=parent1)
-            
-            if random.random() < 0.1:
-                population.remove(parent1)
-
-            if random.random() < 0.1:
-                population.remove(parent2)
+            parent1 = Algorithm.k_tournament(population, self.crossover_k)
+            parent2 = Algorithm.k_tournament(population, self.crossover_k, exclude=parent1)
 
             child = Individual.combine(parent1, parent2, self.weights)
             new_population.append(child)
@@ -219,22 +224,35 @@ class Algorithm:
 
     def local_search_inplace(self, population: Population) -> None:
         for individual in population:
-            individual.local_search(self.weights, self.local_search_rate, self.local_search_attempts)
+            individual.local_search(self.weights, self.local_search_attempts)
 
 
     def elimination(self, population: Population) -> Population:
         survivors: Population = []
 
+        for individual in population:
+            individual.cache_fitness()
+        
         for _ in range(self.lam):
             winner = self.k_tournament(population, self.elimination_k)
         
             survivors.append(winner)
             population.remove(winner)
 
+            for individual in population:
+                individual.update_fitness_penalty(
+                    individual.distance(winner),
+                    self.fitness_sharing_sigma,
+                    self.fitness_sharing_alpha
+                )
+
+        for individual in population:
+            individual.restore_fitness()
+
         return survivors
 
 
-    def __call__(self, population: Population) -> Population:
+    def run(self, population: Population) -> Population:
         population = self.crossover(population)
         self.mutate_inplace(population)
 
@@ -243,6 +261,14 @@ class Algorithm:
 
         return population
 
+
+    def best_individual(self, population):
+        return min(population, key=lambda x: x.fitness)
+
+
+    def average_fitness(self, population: Population):
+        fitnesses = [x.fitness for x in population]
+        return sum(fitnesses) / len(fitnesses)
 
 
 
@@ -255,29 +281,29 @@ def optimize():
     weights = load_tour("./tours/tour750.csv")
     size = weights.shape[0]
 
-    lam = 600
-    mu = 1000
+    lam = 100
+    mu = 300
 
     algorithm = Algorithm(
         weights,
         lam, mu,
-        lam // 20, (lam + mu) // 20,
-        int(size * 0.5),
+        lam // 30, (lam + mu) // 2,
+        int(size * 0.8),
         0.1,
-        5, 80
+        int(size * 0.4),
+        int(size * 0.05), 0.5
     )
 
     population = algorithm.initialize()
 
     plot_data = []
-    for i in range(250):
+    for i in range(100):
         t1 = time.time_ns()
 
-        population = algorithm(population)
+        population = algorithm.run(population)
 
-        best = min(population, key=lambda x: x.fitness)
-        fitnesses = [x.fitness for x in population]
-        average_fit = sum(fitnesses) / len(fitnesses)
+        best = algorithm.best_individual(population)
+        average_fit = algorithm.average_fitness(population)
         plot_data.append((best.fitness, average_fit))
 
         t2 = time.time_ns()
