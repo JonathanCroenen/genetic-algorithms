@@ -71,63 +71,64 @@ class Individual:
         return result
 
 
-    def mutate(self, weights: Weights, rate: float) -> None:
-        while np.random.rand() < rate:
-            size = np.random.randint(self.size // 5)
-            start = np.random.randint(self.size - size - 1) + 1
+    def mutate(self, weights: Weights, rate: float):
+        if random.random() < rate:
+            size = int(random.normalvariate(self.size // 10, self.size // 20))
+            start = random.randint(0, self.size - size - 1)
             end = start + size
-
-            self.genome[start:end] = self.genome[start:end][::-1]
-
-        self.fitness = self.calc_fitness(weights)
+    
+            np.random.shuffle(self.genome[start:end])
+    
+            self.fitness = self.calc_fitness(weights)
 
 
     @staticmethod
     def combine(parent1: 'Individual', parent2: 'Individual', weights: Weights) -> 'Individual':
-        parent1.genome = np.roll(parent1.genome, np.random.randint(parent1.size))
-        parent2.genome = np.roll(parent2.genome, np.random.randint(parent2.size))
-
         child_genome = np.full_like(parent1.genome, -1)
+        start, end = np.random.choice(parent1.size, 2, replace=False)
 
-        start = random.randint(0, parent1.size - 2)
-        size = random.randint(start, parent1.size - 1)
-        end = start + size
-
-        child_genome[start:end] = parent1.genome[start:end]
+        idx_to_fill = None
+        if start <= end:
+            child_genome[start:end] = parent1.genome[start:end]
+            idx_to_fill = np.arange(start + parent1.size - end)
+            idx_to_fill[-parent1.size + end :] = np.arange(end, parent1.size)
+        else:
+            child_genome[start:parent1.size] = parent1.genome[start:parent1.size]
+            child_genome[0:end] = parent1.genome[0:end]
+            idx_to_fill = np.arange(end, start)
 
         last_idx = 0
-        for i in [i for i in range(child_genome.size) if i < start or i >= end]:
-            for j in range(last_idx, parent2.size):
-                if parent2.genome[j] in child_genome:
-                    continue
-
-                child_genome[i] = parent2.genome[j]
-                last_idx = j
-                break
+        for j in idx_to_fill:
+            for n in range(last_idx, parent1.size):
+                if parent2.genome[n] not in child_genome:
+                    child_genome[j] = parent2.genome[n]
+                    last_idx = n + 1
+                    break
 
         return Individual(weights, child_genome, None)
 
 
     def local_search(self, weights: Weights, attempts: int) -> None:
         best_fitness = self.fitness
-        best_swap = (0, 0)
-
+        best_swap = self.genome.copy()
+    
         for _ in range(attempts):
-            size = np.random.randint(self.size // 5)
-            start = np.random.randint(self.size - size - 1) + 1
+            size = 8
+            start = random.randint(0, self.size - size - 1)
             end = start + size
-
-            self.genome[start:end] = self.genome[start:end][::-1]
+    
+            backup = self.genome[start:end].copy()
+            np.random.shuffle(self.genome[start:end])
             new_fitness = self.calc_fitness(weights)
-
             if new_fitness < best_fitness:
                 best_fitness = new_fitness
-                best_swap = (start, end)
-
-            self.genome[start:end] = self.genome[start:end][::-1]
-
-        self.genome[best_swap[0]:best_swap[1]] = self.genome[best_swap[0]:best_swap[1]][::-1]
+                best_swap = self.genome.copy()
+    
+            self.genome[start:end] = backup
+    
+        self.genome = best_swap
         self.fitness = best_fitness
+ 
 
 
     def cache_fitness(self):
@@ -210,7 +211,7 @@ class Algorithm:
         for _ in range(self.mu):
             parent1 = Algorithm.k_tournament(population, self.crossover_k)
             parent2 = Algorithm.k_tournament(population, self.crossover_k, exclude=parent1)
-
+            
             child = Individual.combine(parent1, parent2, self.weights)
             new_population.append(child)
 
@@ -228,10 +229,25 @@ class Algorithm:
 
 
     def elimination(self, population: Population) -> Population:
+        def update_penalties(winner: Individual):
+            nonlocal population
+            for individual in random.sample(population, len(population) // 10):
+                individual.update_fitness_penalty(
+                    individual.distance(winner),
+                    self.fitness_sharing_sigma,
+                    self.fitness_sharing_alpha
+                )
+
         survivors: Population = []
 
         for individual in population:
             individual.cache_fitness()
+
+        elite = self.best_individual(population)
+        survivors.append(elite)
+        population.remove(elite)
+
+        update_penalties(elite)
         
         for _ in range(self.lam):
             winner = self.k_tournament(population, self.elimination_k)
@@ -239,12 +255,7 @@ class Algorithm:
             survivors.append(winner)
             population.remove(winner)
 
-            for individual in population:
-                individual.update_fitness_penalty(
-                    individual.distance(winner),
-                    self.fitness_sharing_sigma,
-                    self.fitness_sharing_alpha
-                )
+            update_penalties(winner)
 
         for individual in population:
             individual.restore_fitness()
@@ -278,18 +289,18 @@ def load_tour(file_path: str) -> Weights:
 
 
 def optimize():
-    weights = load_tour("./tours/tour750.csv")
+    weights = load_tour("./tours/tour250.csv")
     size = weights.shape[0]
 
-    lam = 100
-    mu = 300
+    lam = 200
+    mu = 400
 
     algorithm = Algorithm(
         weights,
         lam, mu,
-        lam // 30, (lam + mu) // 2,
+        lam // 10, (lam + mu) // 4,
         int(size * 0.8),
-        0.1,
+        0.05,
         int(size * 0.4),
         int(size * 0.05), 0.5
     )
@@ -297,7 +308,9 @@ def optimize():
     population = algorithm.initialize()
 
     plot_data = []
-    for i in range(100):
+    total_time = 0.0
+    i = 0
+    while total_time < 5 * 60:
         t1 = time.time_ns()
 
         population = algorithm.run(population)
@@ -308,6 +321,9 @@ def optimize():
 
         t2 = time.time_ns()
         print(f"It: {i} Average: {average_fit:.4f} Best: {best.fitness:.4f} Time: {(t2 - t1) * 1e-9:.2f}")
+        
+        total_time += (t2 - t1) * 1e-9
+        i += 1
 
     plt.plot(plot_data)
     plt.legend(["best", "average"])
