@@ -108,27 +108,45 @@ class Individual:
         return Individual(weights, child_genome, None)
 
 
-    def local_search(self, weights: Weights, attempts: int) -> None:
+    # def local_search(self, weights: Weights) -> None:
+    #     best_fitness = self.fitness
+    #     best_swap = self.genome.copy()
+    #    
+    #     N = 8
+    #     for start in range(self.size - N):
+    #         backup = self.genome[start:start+N].copy()
+    #        
+    #         for _ in range(2):
+    #             np.random.shuffle(self.genome[start:start+N])
+    #             new_fitness = self.calc_fitness(weights)
+    #             if new_fitness < best_fitness:
+    #                 best_swap = self.genome.copy()
+    #                 best_fitness = new_fitness
+    #
+    #         self.genome[start:start+N] = backup
+    #
+    #     self.genome = best_swap
+    #     self.fitness = best_fitness
+
+    def local_search(self, weights: Weights):
         best_fitness = self.fitness
-        best_swap = self.genome.copy()
-    
-        for _ in range(attempts):
-            size = 8
-            start = random.randint(0, self.size - size - 1)
-            end = start + size
-    
-            backup = self.genome[start:end].copy()
-            np.random.shuffle(self.genome[start:end])
-            new_fitness = self.calc_fitness(weights)
-            if new_fitness < best_fitness:
-                best_fitness = new_fitness
-                best_swap = self.genome.copy()
-    
-            self.genome[start:end] = backup
-    
-        self.genome = best_swap
+        best_swap = 0, 0
+
+        for i in range(self.size):
+            for j in range(self.size):
+                if i == j:
+                    continue
+
+                self.genome[i], self.genome[j] = self.genome[j], self.genome[i]
+                new_fitness = self.calc_fitness(weights)
+                if new_fitness < best_fitness:
+                    best_fitness = new_fitness
+                    best_swap = i, j
+
+                self.genome[i], self.genome[j] = self.genome[j], self.genome[i]
+
+        self.genome[best_swap[0]], self.genome[best_swap[1]] = self.genome[best_swap[1]], self.genome[best_swap[0]]
         self.fitness = best_fitness
- 
 
 
     def cache_fitness(self):
@@ -158,6 +176,11 @@ class Individual:
         return distance
 
 
+    def standard_repr(self):
+        i = np.where(self.genome == 0)[0].astype(np.int32)[0]
+        return np.roll(self.genome, -i)
+
+
 class Algorithm:
     def __init__(
             self,
@@ -168,7 +191,6 @@ class Algorithm:
             elimination_k: int,
             initialization_k: int,
             mutation_rate: float,
-            local_search_attempts: int,
             fitness_sharing_sigma: float,
             fitness_sharing_alpha: float
         ) -> None:
@@ -182,7 +204,6 @@ class Algorithm:
         self.initialization_k = initialization_k
 
         self.mutation_rate = mutation_rate
-        self.local_search_attempts = local_search_attempts
 
         self.fitness_sharing_sigma = fitness_sharing_sigma
         self.fitness_sharing_alpha = fitness_sharing_alpha
@@ -225,13 +246,13 @@ class Algorithm:
 
     def local_search_inplace(self, population: Population) -> None:
         for individual in population:
-            individual.local_search(self.weights, self.local_search_attempts)
+            individual.local_search(self.weights)
 
 
     def elimination(self, population: Population) -> Population:
         def update_penalties(winner: Individual):
             nonlocal population
-            for individual in random.sample(population, len(population) // 10):
+            for individual in random.sample(population, len(population) // 15):
                 individual.update_fitness_penalty(
                     individual.distance(winner),
                     self.fitness_sharing_sigma,
@@ -257,7 +278,7 @@ class Algorithm:
 
             update_penalties(winner)
 
-        for individual in population:
+        for individual in survivors:
             individual.restore_fitness()
 
         return survivors
@@ -288,8 +309,29 @@ def load_tour(file_path: str) -> Weights:
         return np.loadtxt(file, delimiter=",", dtype=np.float32)
 
 
-def optimize():
-    weights = load_tour("./tours/tour250.csv")
+def plot(runtime_data):
+
+    plt.plot([(x[1:]) for x in runtime_data])
+    plt.legend(["best", "average"])
+    plt.show()
+
+
+
+def convergence_criterion(max: int):
+    prev_best = 0
+    num_same = 0
+
+    def func(best_fitness: float):
+        nonlocal num_same, prev_best
+        num_same = num_same + 1 if prev_best == best_fitness else 0
+        prev_best = best_fitness
+        return num_same < max
+
+    return func
+
+
+def optimize(tour: str):
+    weights = load_tour(tour)
     size = weights.shape[0]
 
     lam = 200
@@ -301,34 +343,52 @@ def optimize():
         lam // 10, (lam + mu) // 4,
         int(size * 0.8),
         0.05,
-        int(size * 0.4),
         int(size * 0.05), 0.5
     )
 
+    start_time = time.time()
     population = algorithm.initialize()
+    total_time = time.time() - start_time
 
-    plot_data = []
-    total_time = 0.0
+    runtime_data = []
     i = 0
-    while total_time < 5 * 60:
-        t1 = time.time_ns()
+
+    best = algorithm.best_individual(population)
+    best_fit = best.fitness
+    average_fit = algorithm.average_fitness(population)
+    runtime_data.append((0.0, best_fit, average_fit, best.standard_repr().tolist()))
+
+    criterion = convergence_criterion(20)
+
+    while total_time < 5 * 60 and criterion(best_fit):
 
         population = algorithm.run(population)
 
         best = algorithm.best_individual(population)
+        best_fit = best.fitness
         average_fit = algorithm.average_fitness(population)
-        plot_data.append((best.fitness, average_fit))
+        runtime_data.append((total_time, best_fit, average_fit, best.standard_repr().tolist()))
 
-        t2 = time.time_ns()
-        print(f"It: {i} Average: {average_fit:.4f} Best: {best.fitness:.4f} Time: {(t2 - t1) * 1e-9:.2f}")
-        
-        total_time += (t2 - t1) * 1e-9
+        total_time = time.time() - start_time
+        print(f"It: {i} Average: {average_fit:.4f} Best: {best_fit:.4f} Time: {total_time: .2f}")
         i += 1
 
-    plt.plot(plot_data)
-    plt.legend(["best", "average"])
-    plt.show()
+    return runtime_data
 
 
+def save_to_csv(file_name: str, runtime_data):
+    with open(file_name, "w+") as file:
+        file.write('"iteration","time","best-fitness","average-fitness","best-genome"\n')
+        for i, (time, best_fit, average_fit, best_genome) in enumerate(runtime_data):
+            file.write(f'"{i}","{time}","{best_fit}","{average_fit}","{best_genome}"\n')
 
-optimize()
+
+def save_runs():
+    for tour in [50, 100, 250, 500, 750, 1000]:
+        for i in range(30):
+            print(f"Tour {tour}, iteration: {i}")
+            runtime_data = optimize(f"./tours/tour{tour}.csv")
+            save_to_csv(f"runtime-data/tour{tour}/run{i}.csv", runtime_data)
+
+
+optimize("./tours/tour50.csv")
