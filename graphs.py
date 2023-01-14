@@ -73,13 +73,15 @@ class CSVFile:
 
 
 
-def plot_best():
+def plot_best(tour: int):
     best_fitness = float('inf')
     time = []
     best_fits = []
     average_fits = []
-    for i in range(5):
-        with open(f"runtime-data/tour50/run{i}.csv", "r") as file:
+    best_file = ""
+    for i in range(30):
+        file_name = f"runtime-data/tour{tour}/run{i}.csv"
+        with open(file_name, "r") as file:
             csv = CSVFile.read(file)
 
         fits = csv.get_column("best-fitness")
@@ -87,14 +89,19 @@ def plot_best():
             continue
 
         best_fitness = fits[-1]
+        best_file = file_name
 
         best_fits = fits
         time = csv.get_column("time")
         average_fits = csv.get_column("average-fitness")
 
+    print(best_file)
+
     plt.plot(time, [(best, average) for best, average in zip(best_fits, average_fits)])
     plt.legend(["Best Fitness", "Average Fitness"])
-    plt.title("Typical run on tour50.csv")
+    plt.title(f"Typical run on tour{tour}.csv")
+    plt.xlabel("seconds")
+    plt.ylabel("fitness")
     plt.show()
 
 
@@ -103,7 +110,7 @@ def histogram():
     best = []
     average = []
     for i in range(100):
-        with open(f"runtime-data/run{i}.csv") as file:
+        with open(f"histogram-data/run{i}.csv") as file:
             csv = CSVFile.read(file)
             best.append(csv.get_value(-1, "best-fitness"))
             average.append(csv.get_value(-1, "average-fitness"))
@@ -118,15 +125,21 @@ def histogram():
     counts, bins = np.histogram(best)
     counts = [count*10 + 4 for count in counts]
     plt.stairs(counts, bins, fill=True)
+    plt.title("Best fitness histogram of 1000 runs on tour50.csv")
+    plt.xlabel("fitness")
+    plt.ylabel("count")
     plt.show()
 
     plt.figure(2)
     counts, bins = np.histogram(np.array(average, dtype=np.float32))
     counts = [count*10 + 4 for count in counts]
     plt.stairs(counts, bins, fill=True)
+    plt.title("Average fitness histogram of 1000 runs on tour50.csv")
+    plt.xlabel("fitness")
+    plt.ylabel("count")
     plt.show()
 
 
 # histogram()
 
-plot_best()
+plot_best(1000)
