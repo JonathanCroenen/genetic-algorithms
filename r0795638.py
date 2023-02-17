@@ -2,7 +2,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 import random
-import time
 
 from numba import int32, float32
 from numba.experimental import jitclass
@@ -179,15 +178,15 @@ class Individual:
 
 
     def distance(self, other: 'Individual') -> int:
+        edges = set()
+        for edge in zip(self.genome, np.roll(self.genome, 1)):
+            edges.add(edge)
+
         distance = 0
-        for i in range(self.size):
-            for j in range(other.size):
-                if self.genome[i] == other.genome[j]:
-                    distance += self.genome[(i + 1) % self.size] != other.genome[(j + 1) % other.size]
-                    break
+        for edge in zip(other.genome, np.roll(other.genome, 1)):
+            distance += 0 if edge in edges else 1
 
         return distance
-
 
 
 class Algorithm:
@@ -262,7 +261,7 @@ class Algorithm:
     def elimination(self, population: Population) -> Population:
         def update_penalties(winner: Individual):
             nonlocal population
-            for individual in random.sample(population, len(population) // 15):
+            for individual in random.sample(population, len(population) // 5):
                 individual.update_fitness_penalty(
                     individual.distance(winner),
                     self.fitness_sharing_sigma,
@@ -355,8 +354,8 @@ class r0795638:
             "crossover_k": lam // 20,
             "elimination_k": (lam + mu) // 4,
             "mutation_rate": 0.05,
-            "fitness_sharing_sigma": int(size * 0.05),
-            "fitness_sharing_alpha": 0.5
+            "fitness_sharing_sigma": int(size * 0.15),
+            "fitness_sharing_alpha": 4
         }
 
         if log:
@@ -390,7 +389,7 @@ class r0795638:
 
 
 if __name__ == "__main__":
-    best_genome = r0795638().optimize("./tours/tour50.csv")
+    best_genome = r0795638().optimize("./tours/tour1000.csv", log=True)
     print(best_genome)
 
 
